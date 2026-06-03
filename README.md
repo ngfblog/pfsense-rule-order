@@ -2,7 +2,7 @@
 
 Keeps your pfSense firewall rules in the right order, automatically.
 
-> The scripts have been tested on pfSense CE 2.7.2. Make a backup before using. As always, read the code before running anything from the internet.
+> Tested on pfSense CE 2.7.2. Make a backup before using. As always, read the code before running anything from the internet.
 
 ---
 
@@ -10,7 +10,12 @@ Keeps your pfSense firewall rules in the right order, automatically.
 
 pfSense always adds new rules to the bottom of the list. Every time you add a rule, you have to manually drag it to the right position. Miss it once, and your security policy silently breaks.
 
-It gets worse if you're running pfBlockerNG — its cron job rewrites firewall rules periodically, and your carefully ordered rules can get shuffled without any warning. This has been [reported on the Netgate forum since at least 2015](https://forum.netgate.com/topic/89551/pfblockerng-rules-is-going-downwards-in-the-firewall-rule-everyday) (22k+ views) and there's a [feature request open since 2023](https://redmine.pfsense.org/issues/15218) asking for manual rule ordering. Still no built-in fix.
+It gets worse if you're running pfBlockerNG — its cron job rewrites firewall rules periodically, and your carefully ordered rules can get shuffled without any warning. This has been discussed on the Netgate forum in multiple threads with no built-in fix:
+
+- [pfBlockerNG rules going downwards in the firewall rule everyday](https://forum.netgate.com/topic/89551/pfblockerng-rules-is-going-downwards-in-the-firewall-rule-everyday) (22k views)
+- [How to make rules order persistent?](https://forum.netgate.com/topic/117911/how-to-make-rules-order-persistent)
+- [Firewall Rules Order](https://forum.netgate.com/topic/125250/firewall-rules-order)
+- [Rules order randomly changes](https://forum.netgate.com/topic/196601/rules-order-randomly-changes)
 
 This script is my workaround.
 
@@ -30,20 +35,20 @@ Add a number to the start of any rule description in the pfSense GUI:
 A cron job runs the script every few minutes. Each run does this:
 
 1. Reads `/cf/conf/config.xml`
-2. Groups rules by interface
+2. Groups rules by interface (WAN, LAN, OPT1, OPT2, etc.)
 3. Rules without a prefix get a number assigned based on their current position — this only happens once, on first run
 4. Sorts rules by their number within each interface
-5. If the order changed — backs up `config.xml`, then writes the updated version
+5. If the order changed — backs up `config.xml` first, then writes the updated version
 6. Reloads the firewall filter (same as clicking Apply Changes in the GUI)
 7. If nothing changed — exits immediately without touching anything
 
 **What the script never touches:**
 
-- **pfBlockerNG auto rules** — identified by `pfB_` at the start of the description. These are managed by pfBlockerNG and messing with their position would conflict with its cron job.
-- **Floating rules** — identified by `<floating>yes</floating>` in the XML. These live in a separate tab and have their own evaluation order.
-- **Tailscale rules** — identified by `interface = tailscale` in the XML. Same reason as floating — separate context, leave them alone.
+- **pfBlockerNG auto rules** — identified by `pfB_` at the start of the description. pfBlockerNG manages these itself via its own cron job, and touching their position would conflict with it.
+- **Floating rules** — identified by `<floating>yes</floating>` in the XML. These are evaluated differently from interface rules and have their own tab in the GUI.
+- **Tailscale rules** — identified by `interface = tailscale` in the XML. Same reason — separate context, leave them alone.
 
-Everything else on WAN, LAN, and opt interfaces gets a number and stays in order.
+Everything else on WAN, LAN, and OPT interfaces gets a number and stays in order.
 
 ---
 
@@ -73,7 +78,8 @@ MAX_BACKUPS         = 10
 DRY_RUN             = False
 APPLY_RULES         = True
 
-# Internal pfSense interface names: wan, lan, opt1 (first extra interface), opt2, etc.
+# Internal pfSense interface names
+# wan, lan, opt1 (first OPT interface), opt2, opt3, etc.
 MANAGED_INTERFACES  = ["wan", "lan", "opt1"]
 
 # Optional Gotify / ntfy / webhook notification
@@ -134,7 +140,7 @@ If `python3` isn't found, use the full path from step 3 (e.g. `python3.11`).
 
 First run:
 ```
-2026-06-03 06:36:35 [INFO] === pfsense-rule-order v1.0.0 ===
+2026-06-03 06:36:35 [INFO] === pfsense-rule-order v1.1.0 ===
 2026-06-03 06:36:35 [INFO] [LAN] Prefix added: 'Block IoT' -> '03 | Block IoT'
 2026-06-03 06:36:35 [INFO] Backup saved: /cf/conf/rule_order_backups/config_20260603_063635.xml
 2026-06-03 06:36:35 [INFO] config.xml updated successfully.
