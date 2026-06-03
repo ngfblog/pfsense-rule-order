@@ -10,7 +10,7 @@ Keeps your pfSense firewall rules in the right order, automatically.
 
 pfSense always adds new rules to the bottom of the list. Every time you add a rule, you have to manually drag it to the right position. Miss it once, and your security policy silently breaks.
 
-It gets worse if you're running pfBlockerNG — its cron job rewrites firewall rules periodically, and your carefully ordered rules can get shuffled without any warning. This has been discussed on the Netgate forum in multiple threads with no built-in fix:
+It gets worse when packages like pfBlockerNG are installed — they rewrite rules in config.xml periodically, which can shift your manually ordered rules without warning. But even without extra packages, the base problem exists: pfSense has no way to lock rule order. This has come up many times on the Netgate forum with no built-in fix:
 
 - [pfBlockerNG rules going downwards in the firewall rule everyday](https://forum.netgate.com/topic/89551/pfblockerng-rules-is-going-downwards-in-the-firewall-rule-everyday) (22k views)
 - [How to make rules order persistent?](https://forum.netgate.com/topic/117911/how-to-make-rules-order-persistent)
