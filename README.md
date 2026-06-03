@@ -2,23 +2,23 @@
 
 Keeps your pfSense firewall rules in the right order, automatically.
 
+> The scripts have been tested on pfSense CE 2.7.2. Make a backup before using. As always, read the code before running anything from the internet.
+
 ---
 
-## Background
+## The problem
 
-pfSense has a known, long-standing issue where firewall rules get reordered after any config change or package reload. This is particularly annoying when running pfBlockerNG — every cron run can silently shuffle your carefully ordered rules, breaking your security policy without any warning.
+pfSense always adds new rules to the bottom of the list. Every time you add a rule, you have to manually drag it to the right position. Miss it once, and your security policy silently breaks.
 
-This has been discussed extensively on the Netgate forum since at least 2015:
-- [pfBlockerNG rules going downwards in the firewall rule everyday](https://forum.netgate.com/topic/89551/pfblockerng-rules-is-going-downwards-in-the-firewall-rule-everyday) (22.5k views)
-- [Feature request: Allow manual ordering of generated rules](https://redmine.pfsense.org/issues/15218)
+It gets worse if you're running pfBlockerNG — its cron job rewrites firewall rules periodically, and your carefully ordered rules can get shuffled without any warning. This has been [reported on the Netgate forum since at least 2015](https://forum.netgate.com/topic/89551/pfblockerng-rules-is-going-downwards-in-the-firewall-rule-everyday) (22k+ views) and there's a [feature request open since 2023](https://redmine.pfsense.org/issues/15218) asking for manual rule ordering. Still no built-in fix.
 
-There's no built-in fix. This script is my workaround.
+This script is my workaround.
 
 ---
 
 ## How it works
 
-Add a numeric prefix to your rule descriptions directly in the pfSense GUI:
+Add a number to the start of any rule description in the pfSense GUI:
 
 ```
 01 | Zoom UDP
@@ -27,19 +27,23 @@ Add a numeric prefix to your rule descriptions directly in the pfSense GUI:
 04 | Allow LAN to Whitelisted Internal Services
 ```
 
-A cron job runs the script every few minutes. Here's what happens each run:
+A cron job runs the script every few minutes. Each run does this:
 
 1. Reads `/cf/conf/config.xml`
-2. Groups rules by interface (LAN, WAN, opt1, etc.)
-3. Any rule without a prefix gets one assigned based on its current position
-4. Rules are sorted by their prefix number within each interface
-5. If anything changed — backs up `config.xml` first, then writes the updated version
+2. Groups rules by interface
+3. Rules without a prefix get a number assigned based on their current position — this only happens once, on first run
+4. Sorts rules by their number within each interface
+5. If the order changed — backs up `config.xml`, then writes the updated version
 6. Reloads the firewall filter (same as clicking Apply Changes in the GUI)
-7. If everything was already in order — does nothing
+7. If nothing changed — exits immediately without touching anything
 
-pfBlockerNG auto rules (`pfB_*`), Floating rules, and Tailscale rules are never touched — they stay exactly where they are.
+**What the script never touches:**
 
-The first time you run it, prefix numbers get assigned to all your existing rules based on their current order. After that, if a rule gets moved by pfSense or any package, the script puts it back within 5 minutes.
+- **pfBlockerNG auto rules** — identified by `pfB_` at the start of the description. These are managed by pfBlockerNG and messing with their position would conflict with its cron job.
+- **Floating rules** — identified by `<floating>yes</floating>` in the XML. These live in a separate tab and have their own evaluation order.
+- **Tailscale rules** — identified by `interface = tailscale` in the XML. Same reason as floating — separate context, leave them alone.
+
+Everything else on WAN, LAN, and opt interfaces gets a number and stays in order.
 
 ---
 
@@ -53,13 +57,13 @@ The first time you run it, prefix numbers get assigned to all your existing rule
 
 ## Setup
 
-### 1. Copy the script to pfSense
+**1. Copy the script**
 
 ```bash
 cp pfsense_rule_order.py /root/Scripts/
 ```
 
-### 2. Edit the configuration section at the top of the script
+**2. Edit the configuration at the top of the script**
 
 ```python
 CONFIG_XML          = "/cf/conf/config.xml"
@@ -69,40 +73,39 @@ MAX_BACKUPS         = 10
 DRY_RUN             = False
 APPLY_RULES         = True
 
-# Interfaces to manage (internal pfSense names)
-# wan, lan, opt1 = first optional interface (LAN30), opt2, etc.
+# Internal pfSense interface names: wan, lan, opt1 (first extra interface), opt2, etc.
 MANAGED_INTERFACES  = ["wan", "lan", "opt1"]
 
-# Optional webhook notification (Gotify, ntfy, etc.)
+# Optional Gotify / ntfy / webhook notification
 # Example: "http://10.0.0.1:8070/message?token=YOURTOKEN"
 NOTIFY_URL          = ""
 ```
 
-### 3. Get your Python binary name
+**3. Check your Python binary name**
 
 ```bash
 ls /usr/local/bin/python3*
 ```
 
-### 4. Do a dry run first
+**4. Dry run first**
 
-Make sure your rules are in the correct order in the GUI, then:
+Get your rules in the right order in the GUI, then:
 
 ```bash
 python3 /root/Scripts/pfsense_rule_order.py --dry-run
 ```
 
-Check the output — it shows exactly what prefixes will be added and in what order. If something looks wrong, fix the rule order in the GUI first before running for real.
+Check the output before continuing. If something looks wrong, fix the rule order in the GUI first.
 
-### 5. Run it
+**5. Run it**
 
 ```bash
 python3 /root/Scripts/pfsense_rule_order.py
 ```
 
-### 6. Add to cron
+**6. Add to cron**
 
-In the pfSense GUI: **Services > Cron > Add**
+Services > Cron > Add:
 
 | Field | Value |
 |-------|-------|
@@ -114,26 +117,25 @@ In the pfSense GUI: **Services > Cron > Add**
 | User | `root` |
 | Command | `python3 /root/Scripts/pfsense_rule_order.py` |
 
-> If `python3` isn't found, use the full path from step 3 (e.g. `python3.11`)
+If `python3` isn't found, use the full path from step 3 (e.g. `python3.11`).
 
 ---
 
 ## Numbering tips
 
-- Two-digit numbers work best: `01`, `02`, `03` — single digits sort correctly too
+- Two-digit numbers: `01`, `02` — single digits work too but two-digit looks cleaner
 - Leave gaps if you add rules often: `10`, `20`, `30`
-- The last block rule on each interface should always have the highest number
-- pfBlockerNG rules, Floating rules, and Tailscale rules don't need a prefix
+- The last blocking rule on each interface should always have the highest number
+- pfBlockerNG, Floating, and Tailscale rules don't need a number
 
 ---
 
 ## Example output
 
-First run (adds prefixes):
+First run:
 ```
 2026-06-03 06:36:35 [INFO] === pfsense-rule-order v1.0.0 ===
 2026-06-03 06:36:35 [INFO] [LAN] Prefix added: 'Block IoT' -> '03 | Block IoT'
-2026-06-03 06:36:35 [INFO] [LAN] Prefix added: 'Allow LAN to Internet' -> '11 | Allow LAN to Internet'
 2026-06-03 06:36:35 [INFO] Backup saved: /cf/conf/rule_order_backups/config_20260603_063635.xml
 2026-06-03 06:36:35 [INFO] config.xml updated successfully.
 2026-06-03 06:36:35 [INFO] Filter reloaded successfully.
