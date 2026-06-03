@@ -27,11 +27,19 @@ Add a numeric prefix to your rule descriptions directly in the pfSense GUI:
 04 | Allow LAN to Whitelisted Internal Services
 ```
 
-A cron job runs the script every few minutes. It reads `config.xml`, sorts rules by their prefix number within each interface, writes the config back, and reloads the filter.
+A cron job runs the script every few minutes. Here's what happens each run:
 
-Rules without a prefix are never touched — pfBlockerNG auto rules (`pfB_*`), Floating rules, and Tailscale rules stay exactly where they are.
+1. Reads `/cf/conf/config.xml`
+2. Groups rules by interface (LAN, WAN, opt1, etc.)
+3. Any rule without a prefix gets one assigned based on its current position
+4. Rules are sorted by their prefix number within each interface
+5. If anything changed — backs up `config.xml` first, then writes the updated version
+6. Reloads the firewall filter (same as clicking Apply Changes in the GUI)
+7. If everything was already in order — does nothing
 
-The first time you run it, the script automatically assigns prefix numbers to all your existing rules based on their current order. After that, the numbers stick — if a rule gets moved, the script puts it back.
+pfBlockerNG auto rules (`pfB_*`), Floating rules, and Tailscale rules are never touched — they stay exactly where they are.
+
+The first time you run it, prefix numbers get assigned to all your existing rules based on their current order. After that, if a rule gets moved by pfSense or any package, the script puts it back within 5 minutes.
 
 ---
 
