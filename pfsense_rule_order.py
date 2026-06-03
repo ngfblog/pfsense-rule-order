@@ -28,17 +28,30 @@ import re, sys, os, shutil, logging, subprocess
 from datetime import datetime
 from xml.etree import ElementTree as ET
 
+# =============================================================================
+# CONFIGURATION
+# =============================================================================
+
 CONFIG_XML  = "/cf/conf/config.xml"
 BACKUP_DIR  = "/cf/conf/rule_order_backups"
 LOG_FILE    = "/var/log/pfsense_rule_order.log"
 MAX_BACKUPS = 10
 DRY_RUN     = False
 APPLY_RULES = True
+
+# Interfaces to manage (internal pfSense names)
+# wan, lan, opt1 (LAN30), opt2, etc.
+# Floating and Tailscale are always excluded regardless of this list.
 MANAGED_INTERFACES = ["wan", "lan", "opt1"]
+
+# Optional Gotify / ntfy notification
+# Example: "http://10.0.0.1:8070/message?token=YOURTOKEN"
 NOTIFY_URL      = ""
 NOTIFY_PRIORITY = 5
 
-VERSION = "1.1.0"
+# =============================================================================
+
+VERSION   = "1.2.0"
 PREFIX_RE = re.compile(r"^\s*(\d+)\s*\|")
 
 logging.basicConfig(
@@ -47,6 +60,7 @@ logging.basicConfig(
     handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler(sys.stdout)],
 )
 log = logging.getLogger(__name__)
+
 
 def get_prefix(text):
     if not text: return None
@@ -91,9 +105,10 @@ def is_managed(rule):
     if "," in iface: return False
     return True
 
+
 def backup_config():
     os.makedirs(BACKUP_DIR, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ts  = datetime.now().strftime("%Y%m%d_%H%M%S")
     dst = os.path.join(BACKUP_DIR, f"config_{ts}.xml")
     shutil.copy2(CONFIG_XML, dst)
     log.info(f"Backup saved: {dst}")
@@ -101,20 +116,22 @@ def backup_config():
     for old in all_bk[MAX_BACKUPS:]:
         os.remove(os.path.join(BACKUP_DIR, old))
 
+
 def enforce_rule_order(config_path):
     tree = ET.parse(config_path)
     root = tree.getroot()
     filter_elem = root.find("filter")
     if filter_elem is None:
-        log.error("<filter> not found")
+        log.error("<filter> not found in config.xml")
         return False
 
+    # all <rule> elements in XML order
     all_rules = list(filter_elem.findall("rule"))
     if not all_rules:
         log.info("No rules found.")
         return False
 
-    # Step 1: assign prefixes to unprefixed managed rules
+    # --- Step 1: assign prefixes to unprefixed managed rules ---
     iface_managed = {}
     for rule in all_rules:
         if not is_managed(rule): continue
@@ -122,8 +139,7 @@ def enforce_rule_order(config_path):
 
     prefix_changed = False
     for iface, rules in iface_managed.items():
-        taken = {}
-        unprefixed = []
+        taken, unprefixed = {}, []
         for rule in rules:
             p = get_prefix(get_descr(rule))
             if p is not None: taken[p] = rule
@@ -139,29 +155,32 @@ def enforce_rule_order(config_path):
                 prefix_changed = True
             counter += 1
 
-    # Step 2: collect positions of managed rules per interface
-    # KEY FIX: use cursor-based replacement so interleaved interfaces don't break indexing
+    # --- Step 2: sort per interface, detect changes ---
     iface_positions = {}
     for i, rule in enumerate(all_rules):
         if not is_managed(rule): continue
         iface_positions.setdefault(get_interface(rule), []).append(i)
 
-    # Sort managed rules per interface by prefix
     iface_sorted = {}
     order_changed = False
+    change_summary = []
+
     for iface, positions in iface_positions.items():
         rules = [all_rules[p] for p in positions]
         sorted_rules = sorted(rules, key=lambda r: get_prefix(get_descr(r)) or 0)
         iface_sorted[iface] = sorted_rules
+        # compare by description only (not object identity)
         if [get_descr(r) for r in rules] != [get_descr(r) for r in sorted_rules]:
             order_changed = True
             for old, new in zip(rules, sorted_rules):
                 if get_descr(old) != get_descr(new):
-                    log.info(f"[{iface.upper()}] Order: '{get_descr(new)}' moved to position of '{get_descr(old)}'")
+                    msg = f"[{iface.upper()}] Order: '{get_descr(new)}' moved to position of '{get_descr(old)}'"
+                    log.info(msg)
+                    change_summary.append(msg)
+        else:
+            log.info(f"[{iface.upper()}] Already correct, nothing to do.")
 
     if not prefix_changed and not order_changed:
-        for iface in MANAGED_INTERFACES:
-            log.info(f"[{iface.upper()}] Already correct, nothing to do.")
         log.info("All interfaces already correct. Nothing to do.")
         return False
 
@@ -169,49 +188,46 @@ def enforce_rule_order(config_path):
         log.info("DRY RUN -- config.xml NOT modified.")
         return False
 
-    # Rebuild full rule list using cursor per interface
+    # --- Step 3: swap rules IN-PLACE (preserves separators and other children) ---
+    # Build new rule order using cursor per interface
     iface_cursor = {iface: 0 for iface in iface_positions}
-    new_rules = []
+    new_rule_order = []
     for rule in all_rules:
         if is_managed(rule):
             iface = get_interface(rule)
-            new_rules.append(iface_sorted[iface][iface_cursor[iface]])
+            new_rule_order.append(iface_sorted[iface][iface_cursor[iface]])
             iface_cursor[iface] += 1
         else:
-            new_rules.append(rule)
+            new_rule_order.append(rule)
 
-    # Remove all rules and re-append in new order
-    for rule in list(filter_elem.findall("rule")):
-        filter_elem.remove(rule)
-    for rule in new_rules:
-        filter_elem.append(rule)
+    # Replace each <rule> child in filter_elem with the new rule at same position
+    # This preserves separators and other non-rule children exactly where they are
+    rule_children_idx = [i for i, child in enumerate(filter_elem) if child.tag == "rule"]
+    for child_idx, new_rule in zip(rule_children_idx, new_rule_order):
+        filter_elem[child_idx] = new_rule
 
+    # --- Step 4: save and apply ---
     backup_config()
     tmp = config_path + ".rule_order.tmp"
     tree.write(tmp, encoding="utf-8", xml_declaration=True)
     os.replace(tmp, config_path)
     log.info("config.xml updated successfully.")
 
-    if NOTIFY_URL:
+    if NOTIFY_URL and change_summary:
         try:
             import urllib.request, urllib.parse
-            changes = []
-            for iface, positions in iface_positions.items():
-                for old, new in zip([all_rules[p] for p in positions], iface_sorted[iface]):
-                    if get_descr(old) != get_descr(new):
-                        changes.append(f"[{iface.upper()}] '{get_descr(new)}' -> '{get_descr(old)}'")
-            if changes:
-                data = urllib.parse.urlencode({
-                    "title": "pfSense: Rule Order Enforced",
-                    "message": "Changes:\n" + "\n".join(changes),
-                    "priority": NOTIFY_PRIORITY,
-                }).encode()
-                urllib.request.urlopen(urllib.request.Request(NOTIFY_URL, data=data), timeout=5)
-                log.info("Notification sent.")
+            data = urllib.parse.urlencode({
+                "title":    "pfSense: Rule Order Enforced",
+                "message":  "Changes:\n" + "\n".join(change_summary),
+                "priority": NOTIFY_PRIORITY,
+            }).encode()
+            urllib.request.urlopen(urllib.request.Request(NOTIFY_URL, data=data), timeout=5)
+            log.info("Notification sent.")
         except Exception as e:
             log.warning(f"Notification failed: {e}")
 
     return True
+
 
 def reload_filter():
     log.info("Reloading firewall filter...")
@@ -222,6 +238,7 @@ def reload_filter():
     except Exception as e:
         log.error(f"Failed to reload filter: {e}")
 
+
 def check_prerequisites():
     if os.geteuid() != 0:
         log.error("Must be run as root.")
@@ -229,6 +246,7 @@ def check_prerequisites():
     if not os.path.exists(CONFIG_XML):
         log.error(f"config.xml not found: {CONFIG_XML}")
         sys.exit(1)
+
 
 if __name__ == "__main__":
     if "--dry-run" in sys.argv: DRY_RUN = True
