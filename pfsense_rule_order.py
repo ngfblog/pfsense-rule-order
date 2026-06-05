@@ -49,7 +49,7 @@ NOTIFY_PRIORITY = 5
 
 # =============================================================================
 
-VERSION   = "1.3.0"
+VERSION   = "1.4.0"
 PREFIX_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*\|")
 
 logging.basicConfig(
@@ -176,21 +176,19 @@ def enforce_rule_order(config_path):
 
     prefix_changed = False
     for iface, rules in iface_managed.items():
-        taken, unprefixed = {}, []
+        has_unprefixed = any(get_prefix(get_descr(r)) is None for r in rules)
+        if not has_unprefixed:
+            continue
+
+        # Renumber all rules sequentially based on current position
+        # Rules without prefix get inserted at their position,
+        # pushing all subsequent rules +1
+        counter = 1
         for rule in rules:
-            p = get_prefix(get_descr(rule))
-            if p is not None: taken[p] = rule
-            else: unprefixed.append(rule)
-        counter = 1.0
-        for rule in unprefixed:
-            while counter in taken: counter += 1
-            # Format as int if whole number, float if decimal
-            prefix_str = str(int(counter)) if counter == int(counter) else str(counter)
-            new_descr = f"{prefix_str:>2} | {strip_prefix(get_descr(rule))}"
+            new_descr = f"{counter:02d} | {strip_prefix(get_descr(rule))}"
             if get_descr(rule) != new_descr:
-                log.info(f"[{disp(iface, iface_names)}] Prefix added: '{get_descr(rule)}' -> '{new_descr}'")
+                log.info(f"[{disp(iface, iface_names)}] Renumbered: '{get_descr(rule)}' -> '{new_descr}'")
                 set_descr(rule, new_descr)
-                taken[counter] = rule
                 prefix_changed = True
             counter += 1
 
