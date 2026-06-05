@@ -106,6 +106,23 @@ def is_managed(rule, managed_interfaces):
     return True
 
 
+def get_iface_display_names(root):
+    """Read display names from config.xml <interfaces> section (e.g. opt2 -> LAN30_VLAN)."""
+    names = {}
+    interfaces = root.find("interfaces")
+    if interfaces is not None:
+        for iface_elem in interfaces:
+            descr = iface_elem.find("descr")
+            if descr is not None and descr.text:
+                names[iface_elem.tag.lower()] = descr.text.strip()
+    return names
+
+
+def disp(iface, names):
+    """Return display name for interface, fallback to uppercase internal name."""
+    return names.get(iface, iface.upper())
+
+
 def discover_interfaces(all_rules):
     """
     Automatically discover all interfaces that have manual rules.
@@ -146,9 +163,10 @@ def enforce_rule_order(config_path):
         log.info("No rules found.")
         return False
 
-    # Auto-discover managed interfaces
+    # Auto-discover managed interfaces and their display names
     managed_interfaces = discover_interfaces(all_rules)
-    log.info(f"Discovered interfaces: {', '.join(managed_interfaces)}")
+    iface_names = get_iface_display_names(root)
+    log.info(f"Discovered interfaces: {', '.join(disp(i, iface_names) for i in managed_interfaces)}")
 
     # --- Step 1: assign prefixes to unprefixed managed rules ---
     iface_managed = {}
@@ -170,7 +188,7 @@ def enforce_rule_order(config_path):
             prefix_str = str(int(counter)) if counter == int(counter) else str(counter)
             new_descr = f"{prefix_str:>2} | {strip_prefix(get_descr(rule))}"
             if get_descr(rule) != new_descr:
-                log.info(f"[{iface.upper()}] Prefix added: '{get_descr(rule)}' -> '{new_descr}'")
+                log.info(f"[{disp(iface, iface_names)}] Prefix added: '{get_descr(rule)}' -> '{new_descr}'")
                 set_descr(rule, new_descr)
                 taken[counter] = rule
                 prefix_changed = True
@@ -194,11 +212,11 @@ def enforce_rule_order(config_path):
             order_changed = True
             for old, new in zip(rules, sorted_rules):
                 if get_descr(old) != get_descr(new):
-                    msg = f"[{iface.upper()}] Order: '{get_descr(new)}' moved to position of '{get_descr(old)}'"
+                    msg = f"[{disp(iface, iface_names)}] Order: '{get_descr(new)}' moved to position of '{get_descr(old)}'"
                     log.info(msg)
                     change_summary.append(msg)
         else:
-            log.info(f"[{iface.upper()}] Already correct, nothing to do.")
+            log.info(f"[{disp(iface, iface_names)}] Already correct, nothing to do.")
 
     if not prefix_changed and not order_changed:
         log.info("All interfaces already correct. Nothing to do.")
