@@ -17,7 +17,7 @@ Usage:
   python3 pfsense_rule_order.py --dry-run  # preview only, no changes
 
 Requirements:
-  - pfSense CE 2.7.x
+  - pfSense CE 2.7.x / 2.8.x
   - Python 3.x (check: ls /usr/local/bin/python*)
   - Run as root
 
@@ -39,10 +39,8 @@ MAX_BACKUPS = 10
 DRY_RUN     = False
 APPLY_RULES = True
 
-# Interfaces to manage (internal pfSense names)
-# wan, lan, opt1 (LAN30), opt2, etc.
-# Floating and Tailscale are always excluded regardless of this list.
-MANAGED_INTERFACES = ["wan", "lan", "opt1"]
+# Interfaces to always exclude regardless of what exists in config.xml
+EXCLUDED_INTERFACES = ["tailscale"]
 
 # Optional Gotify / ntfy notification
 # Example: "http://10.0.0.1:8070/message?token=YOURTOKEN"
@@ -51,8 +49,8 @@ NOTIFY_PRIORITY = 5
 
 # =============================================================================
 
-VERSION   = "1.2.0"
-PREFIX_RE = re.compile(r"^\s*(\d+)\s*\|")
+VERSION   = "1.3.0"
+PREFIX_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*\|")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -65,7 +63,7 @@ log = logging.getLogger(__name__)
 def get_prefix(text):
     if not text: return None
     m = PREFIX_RE.match(text)
-    return int(m.group(1)) if m else None
+    return float(m.group(1)) if m else None
 
 def strip_prefix(text):
     if not text: return text
@@ -91,19 +89,37 @@ def is_floating(rule):
 def is_pfblockerng(rule):
     return get_descr(rule).startswith("pfB_")
 
-def is_tailscale(rule):
-    return (get_interface(rule) or "") == "tailscale"
-
 def should_skip(rule):
-    return is_floating(rule) or is_tailscale(rule) or is_pfblockerng(rule)
+    iface = get_interface(rule) or ""
+    return (
+        is_floating(rule) or
+        is_pfblockerng(rule) or
+        iface in EXCLUDED_INTERFACES or
+        "," in iface
+    )
 
-def is_managed(rule):
+def is_managed(rule, managed_interfaces):
     iface = get_interface(rule)
-    if not iface or iface not in MANAGED_INTERFACES: return False
+    if not iface or iface not in managed_interfaces: return False
     if should_skip(rule): return False
     if rule.find("tracker") is None: return False
-    if "," in iface: return False
     return True
+
+
+def discover_interfaces(all_rules):
+    """
+    Automatically discover all interfaces that have manual rules.
+    Excludes: floating, tailscale, multi-interface rules (comma), pfBlockerNG.
+    Returns a sorted list of interface names.
+    """
+    found = set()
+    for rule in all_rules:
+        if should_skip(rule): continue
+        if rule.find("tracker") is None: continue
+        iface = get_interface(rule)
+        if iface:
+            found.add(iface)
+    return sorted(found)
 
 
 def backup_config():
@@ -125,16 +141,19 @@ def enforce_rule_order(config_path):
         log.error("<filter> not found in config.xml")
         return False
 
-    # all <rule> elements in XML order
     all_rules = list(filter_elem.findall("rule"))
     if not all_rules:
         log.info("No rules found.")
         return False
 
+    # Auto-discover managed interfaces
+    managed_interfaces = discover_interfaces(all_rules)
+    log.info(f"Discovered interfaces: {', '.join(managed_interfaces)}")
+
     # --- Step 1: assign prefixes to unprefixed managed rules ---
     iface_managed = {}
     for rule in all_rules:
-        if not is_managed(rule): continue
+        if not is_managed(rule, managed_interfaces): continue
         iface_managed.setdefault(get_interface(rule), []).append(rule)
 
     prefix_changed = False
@@ -144,10 +163,12 @@ def enforce_rule_order(config_path):
             p = get_prefix(get_descr(rule))
             if p is not None: taken[p] = rule
             else: unprefixed.append(rule)
-        counter = 1
+        counter = 1.0
         for rule in unprefixed:
             while counter in taken: counter += 1
-            new_descr = f"{counter:02d} | {strip_prefix(get_descr(rule))}"
+            # Format as int if whole number, float if decimal
+            prefix_str = str(int(counter)) if counter == int(counter) else str(counter)
+            new_descr = f"{prefix_str:>2} | {strip_prefix(get_descr(rule))}"
             if get_descr(rule) != new_descr:
                 log.info(f"[{iface.upper()}] Prefix added: '{get_descr(rule)}' -> '{new_descr}'")
                 set_descr(rule, new_descr)
@@ -158,7 +179,7 @@ def enforce_rule_order(config_path):
     # --- Step 2: sort per interface, detect changes ---
     iface_positions = {}
     for i, rule in enumerate(all_rules):
-        if not is_managed(rule): continue
+        if not is_managed(rule, managed_interfaces): continue
         iface_positions.setdefault(get_interface(rule), []).append(i)
 
     iface_sorted = {}
@@ -169,7 +190,6 @@ def enforce_rule_order(config_path):
         rules = [all_rules[p] for p in positions]
         sorted_rules = sorted(rules, key=lambda r: get_prefix(get_descr(r)) or 0)
         iface_sorted[iface] = sorted_rules
-        # compare by description only (not object identity)
         if [get_descr(r) for r in rules] != [get_descr(r) for r in sorted_rules]:
             order_changed = True
             for old, new in zip(rules, sorted_rules):
@@ -188,20 +208,17 @@ def enforce_rule_order(config_path):
         log.info("DRY RUN -- config.xml NOT modified.")
         return False
 
-    # --- Step 3: swap rules IN-PLACE (preserves separators and other children) ---
-    # Build new rule order using cursor per interface
+    # --- Step 3: swap rules IN-PLACE ---
     iface_cursor = {iface: 0 for iface in iface_positions}
     new_rule_order = []
     for rule in all_rules:
-        if is_managed(rule):
+        if is_managed(rule, managed_interfaces):
             iface = get_interface(rule)
             new_rule_order.append(iface_sorted[iface][iface_cursor[iface]])
             iface_cursor[iface] += 1
         else:
             new_rule_order.append(rule)
 
-    # Replace each <rule> child in filter_elem with the new rule at same position
-    # This preserves separators and other non-rule children exactly where they are
     rule_children_idx = [i for i, child in enumerate(filter_elem) if child.tag == "rule"]
     for child_idx, new_rule in zip(rule_children_idx, new_rule_order):
         filter_elem[child_idx] = new_rule
