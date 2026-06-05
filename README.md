@@ -2,15 +2,15 @@
 
 Keeps your pfSense firewall rules in the right order, automatically.
 
-> Tested on pfSense CE 2.7.2. Make a backup before using. As always, read the code before running anything from the internet.
+> Tested on pfSense CE 2.7.2 and 2.8.1. Make a backup before using. Read the code before running anything from the internet.
 
 ---
 
 ## The problem
 
-pfSense always adds new rules to the bottom of the list. Every time you add a rule, you have to manually drag it to the right position. Miss it once, and your security policy silently breaks.
+pfSense always adds new rules to the bottom of the list. Every time you add a rule and forget to drag it into position, your security policy silently breaks.
 
-It gets worse when packages like pfBlockerNG are installed — they rewrite rules in config.xml periodically, which can shift your manually ordered rules without warning. But even without extra packages, the base problem exists: pfSense has no way to lock rule order. This has come up many times on the Netgate forum with no built-in fix:
+It gets worse when packages like pfBlockerNG are installed — they rewrite rules in config.xml periodically, which can shift your manually ordered rules without warning. But even without extra packages, the base problem is the same: pfSense has no way to lock rule order. This has come up many times on the Netgate forum with no built-in fix:
 
 - [pfBlockerNG rules going downwards in the firewall rule everyday](https://forum.netgate.com/topic/89551/pfblockerng-rules-is-going-downwards-in-the-firewall-rule-everyday) (22k views)
 - [How to make rules order persistent?](https://forum.netgate.com/topic/117911/how-to-make-rules-order-persistent)
@@ -32,29 +32,28 @@ Add a number to the start of any rule description in the pfSense GUI:
 04 | Allow LAN to Whitelisted Internal Services
 ```
 
-A cron job runs the script every few minutes. Each run does this:
+A cron job runs the script every hour (or however often you want). Each run does this:
 
 1. Reads `/cf/conf/config.xml`
-2. Groups rules by interface (WAN, LAN, OPT1, OPT2, etc.)
-3. Rules without a prefix get a number assigned based on their current position — this only happens once, on first run
+2. Auto-discovers all interfaces with manual rules (no configuration needed)
+3. Rules without a prefix get numbered based on their current position — pushing subsequent rules +1
 4. Sorts rules by their number within each interface
-5. If the order changed — backs up `config.xml` first, then writes the updated version
-6. Reloads the firewall filter (same as clicking Apply Changes in the GUI)
-7. If nothing changed — exits immediately without touching anything
+5. If anything changed — backs up `config.xml`, writes the updated version, clears the config cache, and reloads the firewall filter
+6. If nothing changed — exits without touching anything
 
 **What the script never touches:**
 
-- **pfBlockerNG auto rules** — identified by `pfB_` at the start of the description. pfBlockerNG manages these itself via its own cron job, and touching their position would conflict with it.
-- **Floating rules** — identified by `<floating>yes</floating>` in the XML. These are evaluated differently from interface rules and have their own tab in the GUI.
-- **Tailscale rules** — identified by `interface = tailscale` in the XML. Same reason — separate context, leave them alone.
+- **pfBlockerNG auto rules** — identified by `pfB_` at the start of the description. pfBlockerNG manages these itself, touching their position would conflict with it.
+- **Floating rules** — identified by `<floating>yes</floating>` in the XML. These have their own evaluation context.
+- **Tailscale rules** — identified by `interface = tailscale` in the XML. Same reason.
 
-Everything else on WAN, LAN, and OPT interfaces gets a number and stays in order.
+If your setup has other rules that should never be moved, open an issue and I'll add them.
 
 ---
 
 ## Requirements
 
-- pfSense CE 2.7.x
+- pfSense CE 2.7.x or 2.8.x
 - Python 3.x — check with: `ls /usr/local/bin/python3*`
 - Run as root
 
@@ -71,21 +70,22 @@ cp pfsense_rule_order.py /root/Scripts/
 **2. Edit the configuration at the top of the script**
 
 ```python
-CONFIG_XML          = "/cf/conf/config.xml"
-BACKUP_DIR          = "/cf/conf/rule_order_backups"
-LOG_FILE            = "/var/log/pfsense_rule_order.log"
-MAX_BACKUPS         = 10
-DRY_RUN             = False
-APPLY_RULES         = True
+CONFIG_XML      = "/cf/conf/config.xml"
+BACKUP_DIR      = "/cf/conf/rule_order_backups"
+LOG_FILE        = "/var/log/pfsense_rule_order.log"
+MAX_BACKUPS     = 10
+DRY_RUN         = False
+APPLY_RULES     = True
 
-# Internal pfSense interface names
-# wan, lan, opt1 (first OPT interface), opt2, opt3, etc.
-MANAGED_INTERFACES  = ["wan", "lan", "opt1"]
+# Interfaces to always exclude (in addition to Floating and pfB_* rules)
+EXCLUDED_INTERFACES = ["tailscale"]
 
 # Optional Gotify / ntfy / webhook notification
 # Example: "http://10.0.0.1:8070/message?token=YOURTOKEN"
-NOTIFY_URL          = ""
+NOTIFY_URL      = ""
 ```
+
+No need to list your interfaces manually — the script discovers them automatically from `config.xml`.
 
 **3. Check your Python binary name**
 
@@ -95,13 +95,13 @@ ls /usr/local/bin/python3*
 
 **4. Dry run first**
 
-Get your rules in the right order in the GUI, then:
+Get your rules in the right order in the GUI first, then:
 
 ```bash
 python3 /root/Scripts/pfsense_rule_order.py --dry-run
 ```
 
-Check the output before continuing. If something looks wrong, fix the rule order in the GUI first.
+Check the output. If something looks wrong, fix the rule order in the GUI before running for real.
 
 **5. Run it**
 
@@ -115,7 +115,7 @@ Services > Cron > Add:
 
 | Field | Value |
 |-------|-------|
-| Minute | `*/5` |
+| Minute | `0` |
 | Hour | `*` |
 | Day | `*` |
 | Month | `*` |
@@ -129,31 +129,35 @@ If `python3` isn't found, use the full path from step 3 (e.g. `python3.11`).
 
 ## Numbering tips
 
-- Two-digit numbers: `01`, `02` — single digits work too but two-digit looks cleaner
-- Leave gaps if you add rules often: `10`, `20`, `30`
+- Two-digit numbers look cleaner: `01`, `02`, `03`
+- If you add rules often, leave gaps: `10`, `20`, `30`
 - The last blocking rule on each interface should always have the highest number
-- pfBlockerNG, Floating, and Tailscale rules don't need a number
+- pfBlockerNG, Floating, and Tailscale rules don't need a number — they're never touched
 
 ---
 
 ## Example output
 
-First run:
+First run (numbering applied):
 ```
-2026-06-03 06:36:35 [INFO] === pfsense-rule-order v1.1.0 ===
-2026-06-03 06:36:35 [INFO] [LAN] Prefix added: 'Block IoT' -> '03 | Block IoT'
-2026-06-03 06:36:35 [INFO] Backup saved: /cf/conf/rule_order_backups/config_20260603_063635.xml
-2026-06-03 06:36:35 [INFO] config.xml updated successfully.
-2026-06-03 06:36:35 [INFO] Filter reloaded successfully.
-2026-06-03 06:36:35 [INFO] === Done ===
+2026-06-05 14:49:23 [INFO] === pfsense-rule-order v1.6.0 ===
+2026-06-05 14:49:23 [INFO] Discovered interfaces: LAN, LAN30_VLAN, WAN
+2026-06-05 14:49:23 [INFO] [LAN30_VLAN] Renumbered: 'Allow LAN to WebUI' -> '03 | Allow LAN to WebUI'
+2026-06-05 14:49:23 [INFO] [LAN30_VLAN] Renumbered: '03 | Block firewall' -> '04 | Block firewall'
+2026-06-05 14:49:23 [INFO] Backup saved: /cf/conf/rule_order_backups/config_20260605_144923.xml
+2026-06-05 14:49:23 [INFO] Config cache cleared.
+2026-06-05 14:49:23 [INFO] config.xml updated successfully.
+2026-06-05 14:49:23 [INFO] Filter reloaded successfully.
+2026-06-05 14:49:23 [INFO] === Done ===
 ```
 
-Subsequent runs when order is already correct:
+When everything is already in order:
 ```
-2026-06-03 06:42:09 [INFO] [WAN] Already correct, nothing to do.
-2026-06-03 06:42:09 [INFO] [LAN] Already correct, nothing to do.
-2026-06-03 06:42:09 [INFO] [OPT1] Already correct, nothing to do.
-2026-06-03 06:42:09 [INFO] All interfaces already correct. Nothing to do.
+2026-06-05 15:10:15 [INFO] Discovered interfaces: LAN, LAN30_VLAN, WAN
+2026-06-05 15:10:15 [INFO] [WAN] Already correct, nothing to do.
+2026-06-05 15:10:15 [INFO] [LAN] Already correct, nothing to do.
+2026-06-05 15:10:15 [INFO] [LAN30_VLAN] Already correct, nothing to do.
+2026-06-05 15:10:15 [INFO] All interfaces already correct. Nothing to do.
 ```
 
 ---
