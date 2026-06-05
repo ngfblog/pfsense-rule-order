@@ -49,7 +49,7 @@ NOTIFY_PRIORITY = 5
 
 # =============================================================================
 
-VERSION   = "1.5.0"
+VERSION   = "1.6.0"
 PREFIX_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*\|")
 
 logging.basicConfig(
@@ -256,6 +256,12 @@ def enforce_rule_order(config_path):
         f.write(raw)
 
     os.replace(tmp, config_path)
+    # Clear config cache so pfSense GUI reloads from the updated config.xml
+    try:
+        os.remove("/tmp/config.cache")
+        log.info("Config cache cleared.")
+    except FileNotFoundError:
+        pass
     log.info("config.xml updated successfully.")
 
     if NOTIFY_URL and change_summary:
