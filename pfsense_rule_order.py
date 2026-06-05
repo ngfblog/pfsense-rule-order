@@ -49,7 +49,7 @@ NOTIFY_PRIORITY = 5
 
 # =============================================================================
 
-VERSION   = "1.4.0"
+VERSION   = "1.5.0"
 PREFIX_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*\|")
 
 logging.basicConfig(
@@ -243,6 +243,18 @@ def enforce_rule_order(config_path):
     backup_config()
     tmp = config_path + ".rule_order.tmp"
     tree.write(tmp, encoding="utf-8", xml_declaration=True)
+
+    # Wrap <descr> values in CDATA — required for pfSense 2.8.x compatibility
+    with open(tmp, 'r', encoding='utf-8') as f:
+        raw = f.read()
+    raw = re.sub(
+        r'<descr>([^<]*)</descr>',
+        lambda m: f'<descr><![CDATA[{m.group(1)}]]></descr>',
+        raw
+    )
+    with open(tmp, 'w', encoding='utf-8') as f:
+        f.write(raw)
+
     os.replace(tmp, config_path)
     log.info("config.xml updated successfully.")
 
